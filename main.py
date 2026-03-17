@@ -200,6 +200,78 @@ def _clean_llm_text(text: str) -> str:
     return text
 
 
+def _split_sentences(text: str) -> list[str]:
+    """
+    Basit cümle bölücü: . ! ? sonrası böl.
+    """
+    t = (text or "").strip()
+    if not t:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", t)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _parse_gemini_output(text: str) -> tuple[Optional[str], list[str]]:
+    """
+    Gemini çıktısından 'Özet' ve 'Fikirler' kısmını ayrıştırır.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None, []
+
+    # Özet kısmı: "Özet:" sonrası, "Fikirler:" öncesi
+    summary = None
+    if "Özet:" in t:
+        after = t.split("Özet:", 1)[1]
+        if "Fikirler:" in after:
+            summary = after.split("Fikirler:", 1)[0].strip()
+        else:
+            summary = after.strip()
+
+    # Fikirler: • ile başlayan satırlar
+    bullets: list[str] = []
+    for ln in t.splitlines():
+        ln = ln.strip()
+        if ln.startswith("•"):
+            bullets.append(re.sub(r"^•\s*", "", ln).strip())
+
+    return summary, bullets
+
+
+def _normalize_summary(summary: str) -> Optional[str]:
+    """
+    Özet 3-4 cümle olacak şekilde normalize eder.
+    """
+    sentences = _split_sentences(summary)
+    if len(sentences) < 3:
+        return None
+    sentences = sentences[:4]
+    merged = " ".join(sentences).strip()
+    return merged if merged else None
+
+
+def _normalize_bullets(bullets: list[str], target: int = 4, max_chars: int = 180) -> list[str]:
+    """
+    Her fikri tek cümleye indirger, yarım kalmayı engeller ve tam target kadar döndürür.
+    """
+    cleaned: list[str] = []
+    for b in bullets:
+        sents = _split_sentences(b)
+        one = sents[0] if sents else b.strip()
+        one = one.strip()
+        if not one:
+            continue
+        if len(one) > max_chars:
+            one = one[:max_chars].rsplit(" ", 1)[0].rstrip()
+        if one and one[-1] not in ".!?":
+            one += "."
+        cleaned.append(one)
+        if len(cleaned) >= target:
+            break
+
+    return cleaned
+
+
 def _gemini_generate_content(api_key: str, model: str, prompt: str, timeout_s: int) -> str:
     """
     Gemini REST çağrısı. API key query param yerine header ile gönderilir.
@@ -212,7 +284,7 @@ def _gemini_generate_content(api_key: str, model: str, prompt: str, timeout_s: i
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.4,
+            "temperature": 0.2,
             "maxOutputTokens": 1400,
         },
     }
@@ -242,26 +314,12 @@ def gemini_use_cases(
     lang = repo.get("language", "")
 
     def is_good(text: str) -> bool:
-        t = (text or "").strip()
-        if not t:
+        summary_raw, bullets_raw = _parse_gemini_output(text)
+        if not summary_raw:
             return False
-        # Beklenen format: Özet + Fikirler + en az birkaç madde
-        if "Özet:" not in t or "Fikirler:" not in t:
-            return False
-        bullets = [ln.strip() for ln in t.splitlines() if ln.strip().startswith("•")]
-        # En az 1 fikir olmalı, en fazla 4 fikir kabul ediyoruz
-        if not (1 <= len(bullets) <= 4):
-            return False
-        # Özet çok uzun olmasın: Özet kısmında 3-4 cümle hedefliyoruz (nokta/ünlem/soru say)
-        try:
-            summary_part = t.split("Fikirler:", 1)[0]
-            summary_text = summary_part.split("Özet:", 1)[1]
-        except IndexError:
-            return False
-        sentence_count = len(re.findall(r"[.!?]\s", summary_text.strip() + " "))
-        if sentence_count > 4:
-            return False
-        return True
+        summary_norm = _normalize_summary(summary_raw)
+        bullets_norm = _normalize_bullets(bullets_raw, target=4)
+        return bool(summary_norm) and len(bullets_norm) == 4
 
     def fallback_ideas() -> str:
         """
@@ -344,7 +402,11 @@ def gemini_use_cases(
 
     text = text.strip()
     if is_good(text):
-        return text
+        summary_raw, bullets_raw = _parse_gemini_output(text)
+        summary_norm = _normalize_summary(summary_raw or "")
+        bullets_norm = _normalize_bullets(bullets_raw, target=4)
+        if summary_norm and len(bullets_norm) == 4:
+            return "Özet: " + summary_norm + "\nFikirler:\n" + "\n".join(f"• {b}" for b in bullets_norm)
 
     # Çıktı eksik geldiyse 2 kez daha, daha sıkı formatla yeniden dene.
     retry_prompt = (
@@ -378,7 +440,13 @@ def gemini_use_cases(
                     raise
             text2 = _clean_llm_text(text2).strip()
             if is_good(text2):
-                return text2
+                summary_raw, bullets_raw = _parse_gemini_output(text2)
+                summary_norm = _normalize_summary(summary_raw or "")
+                bullets_norm = _normalize_bullets(bullets_raw, target=4)
+                if summary_norm and len(bullets_norm) == 4:
+                    return "Özet: " + summary_norm + "\nFikirler:\n" + "\n".join(
+                        f"• {b}" for b in bullets_norm
+                    )
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
         if GEMINI_DEBUG:
             print(f"[GEMINI_DEBUG] Gemini retry başarısız: {e}")
