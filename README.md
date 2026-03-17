@@ -1,82 +1,119 @@
-# GitHub Trending Telegram Botu
+# GitHub Trending → Telegram (Gemini destekli)
 
-Bu script, her çalıştırıldığında `https://github.com/trending` sayfasını tarar, öne çıkan depoları bulur ve size Telegram üzerinden özet bir mesaj gönderir.
+Her gün GitHub Trending’den **ilk 5 projeyi** alır, her proje için **“Bu benim ne işime yarar?”** odaklı kısa bir özet + fikirler üretir ve Telegram’a gönderir.
 
-İsterseniz **yapay zeka anlamlandırma** da açabilirsiniz: repo açıklaması + README’den kısa bir alıntı Gemini’ye gönderilir ve mesajlarda **“Bu benim ne işime yarar?”** sorusuna odaklı 3–5 maddelik kullanım önerileri üretilir.
+- **Hızlı**: İlk 5 repo ile limitli (maliyet kontrolü)
+- **Anlamlı**: Repo açıklaması + README’den kısa alıntı + Gemini ile yorumlama
+- **Pratik**: Her repo **ayrı Telegram mesajı** (kırpılma/limit sorunları minimize)
 
-## Kurulum
+## İndir / Kur
 
-1. **Depoyu / klasörü hazırlayın**
+- **GitHub repo**: `https://github.com/susayanokyanus/gh-trends-digest`
+- **ZIP indir**: `https://github.com/susayanokyanus/gh-trends-digest/archive/refs/heads/main.zip`
+- **Clone (HTTPS)**:
 
-Bu klasörün içinde `main.py` ve `requirements.txt` zaten mevcut olmalı.
+```bash
+git clone https://github.com/susayanokyanus/gh-trends-digest.git
+cd gh-trends-digest
+```
 
-2. **Python sanal ortamı oluşturun (isteğe bağlı ama tavsiye edilir)**
+- **Clone (SSH)**:
+
+```bash
+git clone git@github.com:susayanokyanus/gh-trends-digest.git
+cd gh-trends-digest
+```
+
+## Ne gönderiyor?
+
+Her gün Telegram’da şuna benzer 6 mesaj görürsünüz:
+
+- 1 mesaj: günün başlığı (`📌 GitHub Trending - gg.aa.yyyy`)
+- 5 mesaj: her repo için ayrı içerik:
+  - Repo adı + dil
+  - Kısa açıklama + bugün yıldız
+  - **Özet** (3–4 cümle)
+  - **Fikirler** (en fazla 4 madde) — *“Fikirler olmadan asla bitirme” kuralı aktif*
+
+## Kurulum (lokalde)
+
+### 1) Python sanal ortam
 
 ```bash
 python -m venv venv
-source venv/bin/activate  # Windows için: venv\Scripts\activate
+source venv/bin/activate
 ```
 
-3. **Bağımlılıkları yükleyin**
+### 2) Bağımlılıklar
 
 ```bash
 pip install -r requirements.txt
 ```
 
-4. **Telegram Bot Token ve Chat ID alın**
+### 3) Telegram değerleri
 
-- Telegram'da `@BotFather` ile konuşup yeni bir bot oluşturun, verdiği **bot token**'ı not edin.
-- Bot'unuzdan mesaj almak istediğiniz hesaptan / gruptan bir kez botunuza mesaj atın.
-- `chat_id`'nizi bulmak için:
-  - Basit yol: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` adresine tarayıcıdan gidin, dönen JSON içinde `chat` nesnesindeki `id` değeri sizin `chat_id`'nizdir.
+- Telegram’da `@BotFather` ile bot oluşturun → **bot token**
+- Botunuza mesaj atın → `getUpdates` ile **chat_id** bulun:
+  - `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
 
-5. **.env dosyasını oluşturun**
-
-Bu klasörün köküne `.env` adında bir dosya ekleyin:
+### 4) `.env` oluştur
 
 ```bash
 TELEGRAM_BOT_TOKEN=buraya_bot_token
 TELEGRAM_CHAT_ID=buraya_chat_id
-```
 
-### Opsiyonel: Gemini ile “Bu benim ne işime yarar?” anlamlandırması
-
-1. Google AI Studio üzerinden bir **Gemini API key** alın.
-2. `.env` içine şunu ekleyin:
-
-```bash
+# Opsiyonel ama önerilir (Gemini ile anlamlandırma)
 GEMINI_API_KEY=buraya_gemini_api_key
-```
 
-Model adınız 404 verirse (bazı hesaplarda model isimleri farklı olabiliyor) `.env` içine şunu da ekleyin:
-
-```bash
+# Bazı hesaplarda çalışan model ismi (sende bu çalışıyorsa bunu kullan)
 GEMINI_MODEL=gemini-flash-latest
 ```
-
-`GEMINI_API_KEY` doluysa, script her repo için README’den kısa bir bölüm çekip Gemini’ye göndererek daha anlamlı kullanım önerileri üretir. Anahtar yoksa otomatik olarak basit (kural-tabanlı) tahminlere geri döner.
 
 ## Çalıştırma
 
 ```bash
-python main.py
+./venv/bin/python main.py
 ```
 
-Her çalıştırdığınızda, o anki GitHub Trending listesinden ilk 10 depoyu alıp, ne işe yarayabileceği hakkında kısa notlarla birlikte Telegram hesabınıza gönderir.
+## GitHub Actions ile her gün çalıştırma
 
-## Her gün otomatik çalıştırma (cron)
+Evet, bu bot GitHub Actions ile her gün otomatik çalıştırılabilir.
 
-macOS / Linux için:
+1) Repo ayarlarından **Secrets** ekleyin:
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `GEMINI_API_KEY` (opsiyonel)
+- `GEMINI_MODEL` (opsiyonel)
 
-```bash
-crontab -e
+2) `.github/workflows/daily.yml` ekleyin (örnek):
+
+```yaml
+name: Daily GitHub Trending Digest
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # UTC; TR saati için ayarlayın
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python main.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
 ```
 
-İçine örneğin her gün sabah 09:00'da çalıştırmak için şu satırı ekleyin (yolu kendinize göre güncelleyin):
+## Güvenlik
 
-```bash
-0 9 * * * /usr/bin/env PATH=$PATH:/usr/local/bin cd "/Users/soneratalay/Desktop/GitHub Trending Repo" && /usr/bin/env python main.py >> cron.log 2>&1
-```
-
-Bu sayede her gün belirlediğiniz saatte Telegram'da yeni trending projelerin özeti ve olası kullanım alanlarını içeren bir mesaj alırsınız.
+- `.env` git’e **eklenmez** (`.gitignore` içinde).
+- Telegram/Gemini anahtarlarını **asla README’ye veya issue’lara koymayın**; sadece Secrets/`.env`.
 

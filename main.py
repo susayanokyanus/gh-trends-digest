@@ -248,8 +248,40 @@ def gemini_use_cases(
         # Beklenen format: Özet + Fikirler + en az birkaç madde
         if "Özet:" not in t or "Fikirler:" not in t:
             return False
-        bullet_count = sum(1 for ln in t.splitlines() if ln.strip().startswith("•"))
-        return bullet_count >= 4
+        bullets = [ln.strip() for ln in t.splitlines() if ln.strip().startswith("•")]
+        # En az 1 fikir olmalı, en fazla 4 fikir kabul ediyoruz
+        if not (1 <= len(bullets) <= 4):
+            return False
+        # Özet çok uzun olmasın: Özet kısmında 3-4 cümle hedefliyoruz (nokta/ünlem/soru say)
+        try:
+            summary_part = t.split("Fikirler:", 1)[0]
+            summary_text = summary_part.split("Özet:", 1)[1]
+        except IndexError:
+            return False
+        sentence_count = len(re.findall(r"[.!?]\s", summary_text.strip() + " "))
+        if sentence_count > 4:
+            return False
+        return True
+
+    def fallback_ideas() -> str:
+        """
+        Gemini hiç istenen formatta dönmezse, mesajın 'Fikirler' kısmı boş kalmasın diye
+        kural-tabanlı tahminlerden 4 kısa fikir üret.
+        """
+        base = guess_use_cases(repo)
+        # 4'e tamamla (aynı olmasın diye basit çeşitlilik)
+        expanded: list[str] = []
+        for uc in base:
+            expanded.append(f"• {uc} için küçük bir PoC/prototip çıkarıp kendi ihtiyacına uyarlayabilirsin.")
+            if len(expanded) >= 4:
+                break
+        while len(expanded) < 4:
+            expanded.append("• Repo örneklerini çalıştırıp kendi kullanım senaryona göre bir demo çıkarabilirsin.")
+
+        return (
+            "Özet: Bu proje için yapay zeka çıktısı beklenen formatta üretilemedi; aşağıda hızlı kullanım fikirleri var.\n"
+            "Fikirler:\n" + "\n".join(expanded[:4])
+        )
 
     prompt = (
         "Aşağıdaki GitHub projesini değerlendir.\n"
@@ -260,8 +292,9 @@ def gemini_use_cases(
         "- Belirsizsen varsayımını açıkça belirt.\n"
         "- Markdown kullanma.\n\n"
         "Çıktı formatı (aynen uygula):\n"
-        "1) 'Özet:' ile başlayan TEK bir paragraf yaz (4-7 cümle).\n"
-        "2) 'Fikirler:' satırından sonra 5-8 maddelik liste ver; her satır '• ' ile başlasın.\n\n"
+        "1) 'Özet:' ile başlayan TEK bir paragraf yaz (3-4 cümle).\n"
+        "2) 'Fikirler:' satırından sonra EN FAZLA 4 maddelik liste ver; her satır '• ' ile başlasın ve 1 cümle olsun.\n"
+        "3) 'Fikirler' bölümünü ASLA atlama.\n\n"
         f"Proje adı: {name}\n"
         f"Dil: {lang}\n"
         f"Kısa açıklama: {desc}\n\n"
@@ -313,18 +346,17 @@ def gemini_use_cases(
     if is_good(text):
         return text
 
-    # Çıktı eksik geldiyse 1 kez daha, daha sıkı formatla yeniden dene.
+    # Çıktı eksik geldiyse 2 kez daha, daha sıkı formatla yeniden dene.
     retry_prompt = (
         "Önceki yanıt eksik/format dışı geldi. Lütfen TAM ve belirtilen formatta tekrar yaz.\n"
         "Sadece aşağıdaki formatı kullan:\n"
-        "Özet: <tek paragraf, 5-7 cümle>\n"
+        "Özet: <tek paragraf, 3-4 cümle>\n"
         "Fikirler:\n"
         "• <madde 1>\n"
         "• <madde 2>\n"
         "• <madde 3>\n"
         "• <madde 4>\n"
-        "• <madde 5>\n"
-        "• <madde 6>\n\n"
+        "(En fazla 4 madde. 'Fikirler' olmadan bitirme.)\n\n"
         f"Proje adı: {name}\n"
         f"Dil: {lang}\n"
         f"Kısa açıklama: {desc}\n\n"
@@ -333,25 +365,26 @@ def gemini_use_cases(
     )
 
     try:
-        text2 = ""
-        for model in model_candidates:
-            try:
-                text2 = _gemini_generate_content(api_key, model, retry_prompt, timeout_s)
-                break
-            except requests.HTTPError as e:
-                status = getattr(e.response, "status_code", None)
-                if status == 404:
-                    continue
-                raise
-        text2 = _clean_llm_text(text2).strip()
-        if is_good(text2):
-            return text2
+        for _ in range(2):
+            text2 = ""
+            for model in model_candidates:
+                try:
+                    text2 = _gemini_generate_content(api_key, model, retry_prompt, timeout_s)
+                    break
+                except requests.HTTPError as e:
+                    status = getattr(e.response, "status_code", None)
+                    if status == 404:
+                        continue
+                    raise
+            text2 = _clean_llm_text(text2).strip()
+            if is_good(text2):
+                return text2
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
         if GEMINI_DEBUG:
             print(f"[GEMINI_DEBUG] Gemini retry başarısız: {e}")
 
-    # Yine kötü geldiyse ilk yanıtı döndür (hiç yoktan iyidir)
-    return text
+    # Yine kötü geldiyse: Fikirler olmadan asla bitirme => fallback üret
+    return fallback_ideas()
 
 
 def guess_use_cases(repo: dict) -> list[str]:
