@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import datetime
+from typing import Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -8,10 +9,38 @@ from dotenv import load_dotenv
 
 
 GITHUB_TRENDING_URL = "https://github.com/trending"
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+AI_ENRICH_LIMIT = 5
+GEMINI_DEBUG = os.getenv("GEMINI_DEBUG", "").strip() in {"1", "true", "True", "yes", "YES"}
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip() or "gemini-1.5-flash"
+TELEGRAM_MESSAGE_LIMIT = 3900  # Telegram 4096; biraz pay bırakalım
+AI_TEXT_MAX_CHARS_PER_REPO = 3000  # tek repo çok uzamasın (5 repo gönderiyoruz)
 
 
-def load_config() -> tuple[str, str, str | None]:
+def _truncate_nicely(text: str, max_chars: int) -> str:
+    """
+    Metni mümkünse cümle sonundan kırpar; yoksa satır sonu/boşlukla keser.
+    """
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+
+    head = text[:max_chars].rstrip()
+    # Önce cümle sonunu ara
+    last_sentence = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+    if last_sentence > int(max_chars * 0.55):
+        return head[: last_sentence + 1].rstrip() + "\n• (Devamı için repoya göz at.)"
+
+    # Sonra çift newline/tek newline/boşluk
+    for sep in ["\n\n", "\n", " "]:
+        cut = head.rfind(sep)
+        if cut > int(max_chars * 0.6):
+            return head[:cut].rstrip() + "\n• (Devamı için repoya göz at.)"
+
+    return head.rstrip() + "\n• (Devamı için repoya göz at.)"
+
+
+def load_config() -> Tuple[str, str, Optional[str]]:
     """
     Ortam değişkenlerinden Telegram yapılandırmasını yükler.
     Gerekli: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -164,16 +193,46 @@ def _clean_llm_text(text: str) -> str:
     text = (text or "").strip()
     # Gemini bazen kod bloğu veya başlık döndürebiliyor; Telegram mesajına uygun sadeleştirelim.
     text = re.sub(r"```[\s\S]*?```", "", text).strip()
+    # Basit markdown vurgularını temizle
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
+
+
+def _gemini_generate_content(api_key: str, model: str, prompt: str, timeout_s: int) -> str:
+    """
+    Gemini REST çağrısı. API key query param yerine header ile gönderilir.
+    """
+    url = f"{GEMINI_API_BASE}/{model}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.4,
+            "maxOutputTokens": 1400,
+        },
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=timeout_s)
+    resp.raise_for_status()
+    data = resp.json()
+    return (
+        data.get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [{}])[0]
+        .get("text", "")
+    )
 
 
 def gemini_use_cases(
     api_key: str,
     repo: dict,
     readme_excerpt: str,
-    timeout_s: int = 25,
-) -> list[str]:
+    timeout_s: int = 35,
+) -> str:
     """
     Repo açıklaması + README parçasını Gemini'ye gönderip
     'bu benim ne işime yarar?' odaklı kullanım alanları üretir.
@@ -182,65 +241,117 @@ def gemini_use_cases(
     desc = repo.get("description", "")
     lang = repo.get("language", "")
 
+    def is_good(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return False
+        # Beklenen format: Özet + Fikirler + en az birkaç madde
+        if "Özet:" not in t or "Fikirler:" not in t:
+            return False
+        bullet_count = sum(1 for ln in t.splitlines() if ln.strip().startswith("•"))
+        return bullet_count >= 4
+
     prompt = (
         "Aşağıdaki GitHub projesini değerlendir.\n"
-        "Amacım: 'Bu benim ne işime yarar?' sorusuna pratik cevaplar.\n\n"
+        "Amacım: 'Bu benim ne işime yarar?' sorusuna düşünülmüş ve yaratıcı cevaplar.\n\n"
         "Kurallar:\n"
         "- Türkçe yaz.\n"
-        "- 3 ila 5 madde üret.\n"
-        "- Her madde 1 cümle olsun.\n"
         "- Pazarlama dili kullanma; somut kullanım senaryosu yaz.\n"
-        "- Belirsizsen varsayımını madde içinde belirt.\n\n"
+        "- Belirsizsen varsayımını açıkça belirt.\n"
+        "- Markdown kullanma.\n\n"
+        "Çıktı formatı (aynen uygula):\n"
+        "1) 'Özet:' ile başlayan TEK bir paragraf yaz (4-7 cümle).\n"
+        "2) 'Fikirler:' satırından sonra 5-8 maddelik liste ver; her satır '• ' ile başlasın.\n\n"
         f"Proje adı: {name}\n"
         f"Dil: {lang}\n"
         f"Kısa açıklama: {desc}\n\n"
-        "README alıntısı (kısmi):\n"
+        "README alıntısı (kısmi, boş olabilir):\n"
         f"{readme_excerpt}\n"
     )
 
-    url = f"{GEMINI_API_URL}?key={api_key}"
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.4,
-            "maxOutputTokens": 220,
-        },
-    }
-
     try:
-        resp = requests.post(url, json=payload, timeout=timeout_s)
-        resp.raise_for_status()
-        data = resp.json()
-        text = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
+        # Bazı hesaplarda model isimleri farklı olabiliyor; 404 alırsak alternatifleri dene.
+        model_candidates = [GEMINI_MODEL]
+        for alt in ["gemini-1.5-flash-latest", "gemini-flash-latest", "gemini-1.5-flash-002"]:
+            if alt not in model_candidates:
+                model_candidates.append(alt)
+
+        last_err: Optional[Exception] = None
+        text = ""
+        for model in model_candidates:
+            try:
+                text = _gemini_generate_content(api_key, model, prompt, timeout_s)
+                if GEMINI_DEBUG and model != GEMINI_MODEL:
+                    print(f"[GEMINI_DEBUG] Model fallback ile başarılı: {model}")
+                break
+            except requests.HTTPError as e:
+                last_err = e
+                # 404 -> model/method bulunamadı, alternatif dene
+                status = getattr(e.response, "status_code", None)
+                if GEMINI_DEBUG:
+                    print(f"[GEMINI_DEBUG] Gemini HTTPError (model={model}, status={status})")
+                if status == 404:
+                    continue
+                raise
+            except requests.RequestException as e:
+                last_err = e
+                raise
+
+        if not text and last_err:
+            raise last_err
+
         text = _clean_llm_text(text)
-    except (requests.RequestException, ValueError, KeyError, IndexError):
-        return []
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        if GEMINI_DEBUG:
+            print(f"[GEMINI_DEBUG] Gemini çağrısı başarısız: {e}")
+        return ""
 
     if not text:
-        return []
+        return ""
 
-    # Çıktıyı maddelere dönüştür (•, -, 1. vs.)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    bullets: list[str] = []
-    for ln in lines:
-        ln = re.sub(r"^[-•]\s*", "", ln)
-        ln = re.sub(r"^\d+\.\s*", "", ln)
-        if ln:
-            bullets.append(ln)
+    text = text.strip()
+    if is_good(text):
+        return text
 
-    # Çok uzun/az ise kırp
-    bullets = bullets[:5]
-    return bullets
+    # Çıktı eksik geldiyse 1 kez daha, daha sıkı formatla yeniden dene.
+    retry_prompt = (
+        "Önceki yanıt eksik/format dışı geldi. Lütfen TAM ve belirtilen formatta tekrar yaz.\n"
+        "Sadece aşağıdaki formatı kullan:\n"
+        "Özet: <tek paragraf, 5-7 cümle>\n"
+        "Fikirler:\n"
+        "• <madde 1>\n"
+        "• <madde 2>\n"
+        "• <madde 3>\n"
+        "• <madde 4>\n"
+        "• <madde 5>\n"
+        "• <madde 6>\n\n"
+        f"Proje adı: {name}\n"
+        f"Dil: {lang}\n"
+        f"Kısa açıklama: {desc}\n\n"
+        "README alıntısı (kısmi, boş olabilir):\n"
+        f"{readme_excerpt}\n"
+    )
+
+    try:
+        text2 = ""
+        for model in model_candidates:
+            try:
+                text2 = _gemini_generate_content(api_key, model, retry_prompt, timeout_s)
+                break
+            except requests.HTTPError as e:
+                status = getattr(e.response, "status_code", None)
+                if status == 404:
+                    continue
+                raise
+        text2 = _clean_llm_text(text2).strip()
+        if is_good(text2):
+            return text2
+    except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+        if GEMINI_DEBUG:
+            print(f"[GEMINI_DEBUG] Gemini retry başarısız: {e}")
+
+    # Yine kötü geldiyse ilk yanıtı döndür (hiç yoktan iyidir)
+    return text
 
 
 def guess_use_cases(repo: dict) -> list[str]:
@@ -298,63 +409,98 @@ def guess_use_cases(repo: dict) -> list[str]:
     return use_cases
 
 
-def build_message(repos: list[dict], gemini_api_key: str | None) -> str:
-    today_str = datetime.now().strftime("%d.%m.%Y")
+def _build_repo_message(idx: int, repo: dict, gemini_api_key: Optional[str]) -> str:
+    use_cases = guess_use_cases(repo)
+
     lines: list[str] = []
-    lines.append(f"📌 GitHub Trending - {today_str}")
-    lines.append("")
+    lines.append(f"{idx}. {repo['full_name']} ({repo.get('language') or 'Dil belirtilmemiş'})")
+    if repo.get("description"):
+        lines.append(f"- Açıklama: {repo['description']}")
+    if repo.get("stars_today"):
+        lines.append(f"- Bugün eklenen yıldız: {repo['stars_today']}")
+
+    ai_text = ""
+    if gemini_api_key and idx <= AI_ENRICH_LIMIT:
+        readme_excerpt = fetch_readme_excerpt(repo["full_name"])
+        ai_text = gemini_use_cases(gemini_api_key, repo, readme_excerpt)
+        if GEMINI_DEBUG and not readme_excerpt:
+            print(f"[GEMINI_DEBUG] README bulunamadı: {repo['full_name']}")
+
+    lines.append("- Bu benim ne işime yarar?")
+    if ai_text:
+        ai_text = _truncate_nicely(ai_text, AI_TEXT_MAX_CHARS_PER_REPO)
+        lines.extend([ln.strip() for ln in ai_text.splitlines() if ln.strip()])
+    else:
+        for uc in use_cases:
+            lines.append(f"• {uc}")
+
+    lines.append(f"- Repo: {repo['url']}")
+    return "\n".join(lines).strip()
+
+
+def build_messages(repos: list[dict], gemini_api_key: Optional[str]) -> list[str]:
+    today_str = datetime.now().strftime("%d.%m.%Y")
+    messages: list[str] = [f"📌 GitHub Trending - {today_str}"]
 
     if not repos:
-        lines.append("Bugün için trend olan depo bulunamadı.")
-        return "\n".join(lines)
+        messages.append("Bugün için trend olan depo bulunamadı.")
+        return messages
 
     for idx, repo in enumerate(repos, start=1):
-        use_cases = guess_use_cases(repo)
+        messages.append(_build_repo_message(idx, repo, gemini_api_key))
 
-        lines.append(f"{idx}. {repo['full_name']} ({repo.get('language') or 'Dil belirtilmemiş'})")
-        if repo.get("description"):
-            lines.append(f"   - Açıklama: {repo['description']}")
-        if repo.get("stars_today"):
-            lines.append(f"   - Bugün eklenen yıldız: {repo['stars_today']}")
+    return messages
 
-        # AI varsa: README çek + Gemini ile anlamlandır. Yoksa: kural-tabanlı tahmin.
-        ai_bullets: list[str] = []
-        if gemini_api_key:
-            readme_excerpt = fetch_readme_excerpt(repo["full_name"])
-            if readme_excerpt:
-                ai_bullets = gemini_use_cases(gemini_api_key, repo, readme_excerpt)
 
-        lines.append("   - Bu benim ne işime yarar?")
-        if ai_bullets:
-            for b in ai_bullets:
-                lines.append(f"     • {b}")
-        else:
-            for uc in use_cases:
-                lines.append(f"     • {uc}")
+def _split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """
+    Telegram mesaj limiti için metni parçalar.
+    Öncelik: boş satır, sonra satır sonu.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return [text]
 
-        lines.append(f"   - Repo: {repo['url']}")
-        lines.append("")  # boş satır
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining.strip())
+            break
 
-    return "\n".join(lines)
+        candidate = remaining[:limit]
+        cut = candidate.rfind("\n\n")
+        if cut < 0:
+            cut = candidate.rfind("\n")
+        if cut < 0 or cut < int(limit * 0.6):
+            cut = limit
+
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].lstrip()
+
+    return chunks
 
 
 def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
-    response = requests.post(url, data=payload, timeout=20)
-    response.raise_for_status()
+    for part in _split_telegram_text(text):
+        payload = {
+            "chat_id": chat_id,
+            "text": part,
+            "disable_web_page_preview": True,
+        }
+        response = requests.post(url, data=payload, timeout=20)
+        response.raise_for_status()
 
 
 def main() -> None:
     bot_token, chat_id, gemini_api_key = load_config()
     html = fetch_trending_html()
-    repos = parse_trending_repos(html, limit=10)
-    message = build_message(repos, gemini_api_key)
-    send_telegram_message(bot_token, chat_id, message)
+    repos = parse_trending_repos(html, limit=5)
+    for msg in build_messages(repos, gemini_api_key):
+        send_telegram_message(bot_token, chat_id, msg)
 
 
 if __name__ == "__main__":

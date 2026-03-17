@@ -48,6 +48,12 @@ TELEGRAM_CHAT_ID=buraya_chat_id
 GEMINI_API_KEY=buraya_gemini_api_key
 ```
 
+Model adınız 404 verirse (bazı hesaplarda model isimleri farklı olabiliyor) `.env` içine şunu da ekleyin:
+
+```bash
+GEMINI_MODEL=gemini-flash-latest
+```
+
 `GEMINI_API_KEY` doluysa, script her repo için README’den kısa bir bölüm çekip Gemini’ye göndererek daha anlamlı kullanım önerileri üretir. Anahtar yoksa otomatik olarak basit (kural-tabanlı) tahminlere geri döner.
 
 ## Çalıştırma
