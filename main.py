@@ -2,6 +2,7 @@ import os
 import re
 from datetime import datetime
 from typing import Optional, Tuple
+from html import escape as html_escape
 
 import requests
 from bs4 import BeautifulSoup
@@ -38,6 +39,13 @@ def _truncate_nicely(text: str, max_chars: int) -> str:
             return head[:cut].rstrip() + "\n• (Devamı için repoya göz at.)"
 
     return head.rstrip() + "\n• (Devamı için repoya göz at.)"
+
+
+def _escape(text: str) -> str:
+    """
+    Telegram HTML parse_mode için güvenli hale getir.
+    """
+    return html_escape(text or "", quote=False)
 
 
 def load_config() -> Tuple[str, str, Optional[str]]:
@@ -513,12 +521,11 @@ def guess_use_cases(repo: dict) -> list[str]:
 def _build_repo_message(idx: int, repo: dict, gemini_api_key: Optional[str]) -> str:
     use_cases = guess_use_cases(repo)
 
-    lines: list[str] = []
-    lines.append(f"{idx}. {repo['full_name']} ({repo.get('language') or 'Dil belirtilmemiş'})")
-    if repo.get("description"):
-        lines.append(f"- Açıklama: {repo['description']}")
-    if repo.get("stars_today"):
-        lines.append(f"- Bugün eklenen yıldız: {repo['stars_today']}")
+    full_name = repo.get("full_name", "")
+    language = repo.get("language") or "Dil belirtilmemiş"
+    description = repo.get("description") or ""
+    stars_today = repo.get("stars_today") or 0
+    url = repo.get("url") or ""
 
     ai_text = ""
     if gemini_api_key and idx <= AI_ENRICH_LIMIT:
@@ -527,21 +534,55 @@ def _build_repo_message(idx: int, repo: dict, gemini_api_key: Optional[str]) -> 
         if GEMINI_DEBUG and not readme_excerpt:
             print(f"[GEMINI_DEBUG] README bulunamadı: {repo['full_name']}")
 
-    lines.append("- Bu benim ne işime yarar?")
+    parts: list[str] = []
+    parts.append(f"<b>{idx}. {_escape(full_name)}</b>  <i>({_escape(language)})</i>")
+
+    if description:
+        parts.append(f"<b>Açıklama</b>\n{_escape(description)}")
+
+    if stars_today:
+        parts.append(f"<b>Bugün eklenen yıldız</b>\n{_escape(str(stars_today))}")
+
     if ai_text:
         ai_text = _truncate_nicely(ai_text, AI_TEXT_MAX_CHARS_PER_REPO)
-        lines.extend([ln.strip() for ln in ai_text.splitlines() if ln.strip()])
-    else:
-        for uc in use_cases:
-            lines.append(f"• {uc}")
+        summary_raw, bullets_raw = _parse_gemini_output(ai_text)
+        summary_norm = _normalize_summary(summary_raw or "") if summary_raw else None
+        bullets_norm = _normalize_bullets(bullets_raw, target=4)
 
-    lines.append(f"- Repo: {repo['url']}")
-    return "\n".join(lines).strip()
+        if summary_norm:
+            section_lines = [f"<b>Özet</b>\n{_escape(summary_norm)}"]
+        else:
+            # Özet parse edilemezse ham metni güvenli şekilde koy
+            section_lines = [f"<b>Özet</b>\n{_escape(ai_text.splitlines()[0])}"]
+
+        # Fikirler her koşulda gösterilsin
+        section_lines.append("<b>Fikirler</b>")
+        if bullets_norm:
+            section_lines.extend([f"• {_escape(b)}" for b in bullets_norm])
+        else:
+            # En kötü ihtimalle kural-tabanlı fikirler üret
+            for uc in (use_cases or ["Genel amaçlı kullanım"]):
+                section_lines.append(f"• {_escape(uc)} için küçük bir PoC/prototip çıkarabilirsin.")
+                if len(section_lines) >= 1 + 1 + 4:
+                    break
+
+        parts.append("\n".join(section_lines))
+    else:
+        # AI yoksa: kısa, düzenli alan tahminleri
+        section_lines = ["<b>Bu benim ne işime yarar?</b>"]
+        for uc in use_cases[:4]:
+            section_lines.append(f"• {_escape(uc)}")
+        parts.append("\n".join(section_lines))
+
+    if url:
+        parts.append(f"<b>Repo</b>\n{_escape(url)}")
+
+    return "\n\n".join(parts).strip()
 
 
 def build_messages(repos: list[dict], gemini_api_key: Optional[str]) -> list[str]:
     today_str = datetime.now().strftime("%d.%m.%Y")
-    messages: list[str] = [f"📌 GitHub Trending - {today_str}"]
+    messages: list[str] = [f"<b>GitHub Trending</b> — <i>{_escape(today_str)}</i>\nİlk <b>5</b> proje özeti ve fikirler."]
 
     if not repos:
         messages.append("Bugün için trend olan depo bulunamadı.")
@@ -590,6 +631,7 @@ def send_telegram_message(bot_token: str, chat_id: str, text: str) -> None:
         payload = {
             "chat_id": chat_id,
             "text": part,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
         response = requests.post(url, data=payload, timeout=20)
