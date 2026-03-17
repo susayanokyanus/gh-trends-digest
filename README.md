@@ -1,119 +1,78 @@
-# GitHub Trending → Telegram (Gemini destekli)
+# GitHub Trending → Telegram (Gemini-powered)
 
-Her gün GitHub Trending’den **ilk 5 projeyi** alır, her proje için **“Bu benim ne işime yarar?”** odaklı kısa bir özet + fikirler üretir ve Telegram’a gönderir.
+Get a daily GitHub Trending digest delivered to Telegram, enriched with a practical “Why does this matter to me?” explanation powered by Gemini.
 
-- **Hızlı**: İlk 5 repo ile limitli (maliyet kontrolü)
-- **Anlamlı**: Repo açıklaması + README’den kısa alıntı + Gemini ile yorumlama
-- **Pratik**: Her repo **ayrı Telegram mesajı** (kırpılma/limit sorunları minimize)
+- **Cost-controlled**: processes only the **top 5** trending repos
+- **Useful**: uses repo description + README excerpt to generate concrete ideas
+- **Readable**: posts **one repo per message** with bold section headings
 
-## İndir / Kur
+## Quick start
 
-- **GitHub repo**: `https://github.com/susayanokyanus/gh-trends-digest`
-- **ZIP indir**: `https://github.com/susayanokyanus/gh-trends-digest/archive/refs/heads/main.zip`
-- **Clone (HTTPS)**:
+### Clone
 
 ```bash
 git clone https://github.com/susayanokyanus/gh-trends-digest.git
 cd gh-trends-digest
 ```
 
-- **Clone (SSH)**:
-
-```bash
-git clone git@github.com:susayanokyanus/gh-trends-digest.git
-cd gh-trends-digest
-```
-
-## Ne gönderiyor?
-
-Her gün Telegram’da şuna benzer 6 mesaj görürsünüz:
-
-- 1 mesaj: günün başlığı (`📌 GitHub Trending - gg.aa.yyyy`)
-- 5 mesaj: her repo için ayrı içerik:
-  - Repo adı + dil
-  - Kısa açıklama + bugün yıldız
-  - **Özet** (3–4 cümle)
-  - **Fikirler** (en fazla 4 madde) — *“Fikirler olmadan asla bitirme” kuralı aktif*
-
-## Kurulum (lokalde)
-
-### 1) Python sanal ortam
+### Install
 
 ```bash
 python -m venv venv
 source venv/bin/activate
-```
-
-### 2) Bağımlılıklar
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3) Telegram değerleri
+### Configure
 
-- Telegram’da `@BotFather` ile bot oluşturun → **bot token**
-- Botunuza mesaj atın → `getUpdates` ile **chat_id** bulun:
-  - `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
-
-### 4) `.env` oluştur
+Create a `.env` file in the project root:
 
 ```bash
-TELEGRAM_BOT_TOKEN=buraya_bot_token
-TELEGRAM_CHAT_ID=buraya_chat_id
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 
-# Opsiyonel ama önerilir (Gemini ile anlamlandırma)
-GEMINI_API_KEY=buraya_gemini_api_key
-
-# Bazı hesaplarda çalışan model ismi (sende bu çalışıyorsa bunu kullan)
+# Optional (recommended): Gemini enrichment
+GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-flash-latest
 ```
 
-## Çalıştırma
+## What you’ll receive on Telegram
+
+Each run sends:
+- 1 header message (date + scope)
+- 5 repo messages (top 5 trending), each containing:
+  - Description + today’s stars
+  - **Özet** (3–4 sentences)
+  - **Fikirler** (exactly 4 single-sentence ideas; never omitted)
+  - Repo link
+
+## Run locally
 
 ```bash
 ./venv/bin/python main.py
 ```
 
-## GitHub Actions ile her gün çalıştırma
+## Run daily with GitHub Actions
 
-Evet, bu bot GitHub Actions ile her gün otomatik çalıştırılabilir.
+This repo includes a scheduled workflow: `.github/workflows/daily.yml`.
 
-1) Repo ayarlarından **Secrets** ekleyin:
+### Add repository secrets
+
+In GitHub: **Settings → Secrets and variables → Actions**
+
+Add:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-- `GEMINI_API_KEY` (opsiyonel)
-- `GEMINI_MODEL` (opsiyonel)
+- `GEMINI_API_KEY` (optional)
+- `GEMINI_MODEL` (optional, recommended: `gemini-flash-latest`)
 
-2) `.github/workflows/daily.yml` ekleyin (örnek):
+### Test manually
 
-```yaml
-name: Daily GitHub Trending Digest
+Go to **Actions → Daily GitHub Trending Digest → Run workflow**.
 
-on:
-  schedule:
-    - cron: "0 9 * * *" # UTC; TR saati için ayarlayın
-  workflow_dispatch:
+## Notes
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python main.py
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
-```
+- `.env` is ignored by git (do not commit secrets).
+- If your Gemini model name returns 404, set `GEMINI_MODEL=gemini-flash-latest` in Secrets/env.
 
-## Güvenlik
-
-- `.env` git’e **eklenmez** (`.gitignore` içinde).
-- Telegram/Gemini anahtarlarını **asla README’ye veya issue’lara koymayın**; sadece Secrets/`.env`.
 
