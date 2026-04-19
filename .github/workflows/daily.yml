@@ -2,8 +2,8 @@ name: Daily GitHub Trending Digest
 
 on:
   schedule:
-    # Türkiye saati 09:00 (UTC+3) => UTC 06:00
-    - cron: "0 6 * * *"
+    # 5 günde bir, Türkiye saati 09:00 (UTC+3) => UTC 06:00
+    - cron: "0 6 */5 * *"
   workflow_dispatch:
 
 permissions:
